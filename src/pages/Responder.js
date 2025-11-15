@@ -14,7 +14,7 @@ export default function Responder({ onLogout }) {
 
   const user = useMemo(() => JSON.parse(localStorage.getItem('user') || '{}'), []);
 //  const socket = useMemo(() => io(API_BASE), []);
-const socket = useMemo(() => io("http://92.5.79.20:9000", {
+const socket = useMemo(() => io("https://sos.server.kameocabs.com/", {
   transports: ["websocket", "polling"],
   upgrade: true
 }), []);
