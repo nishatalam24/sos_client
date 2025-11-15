@@ -36,7 +36,7 @@ export default function App() {
     localStorage.clear();
     setToken(null);
   };
-
+console.log('Maps key:', process.env.REACT_APP_GOOGLE_MAPS_KEY);
   return (
     <BrowserRouter>
       <Routes>
