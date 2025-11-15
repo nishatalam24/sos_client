@@ -6,10 +6,10 @@ import api from '../api';
 export default function Dashboard({ onLogout }) {
   const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5500';
 
-  const [active, setActive] = useState(false);
+  const [emergencyId, setEmergencyId] = useState(() => localStorage.getItem('sosEmergencyId'));
+  const [active, setActive] = useState(() => Boolean(localStorage.getItem('sosEmergencyId')));
   const [status, setStatus] = useState('');
   const [coords, setCoords] = useState(null);
-  const [emergencyId, setEmergencyId] = useState(null);
   const [remoteStreams, setRemoteStreams] = useState([]);
   const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState('');
@@ -19,7 +19,8 @@ export default function Dashboard({ onLogout }) {
     () =>
       io(API_BASE, {
         transports: ['websocket', 'polling'],
-        upgrade: true
+        upgrade: true,
+        reconnectionAttempts: 3
       }),
     [API_BASE]
   );
@@ -59,7 +60,7 @@ export default function Dashboard({ onLogout }) {
       await ensureLocalStream();
       return true;
     } catch (error) {
-      console.warn('Media access blocked, sending coordinates only.', error);
+      console.warn('Media blocked, fallback to coordinates only.', error);
       setStatus('Camera blocked; sharing only coordinates.');
       return false;
     }
@@ -67,26 +68,32 @@ export default function Dashboard({ onLogout }) {
 
   const createPeerConnection = useCallback(
     (peerId) => {
-      const pc = new RTCPeerConnection();
-      peersRef.current[peerId] = pc;
+      try {
+        const pc = new RTCPeerConnection();
+        peersRef.current[peerId] = pc;
 
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          socket.emit('signal', { target: peerId, candidate: event.candidate });
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            socket.emit('signal', { target: peerId, candidate: event.candidate });
+          }
+        };
+
+        pc.ontrack = (event) => {
+          setRemoteStreams((prev) => {
+            if (prev.find((p) => p.peerId === peerId)) return prev;
+            return [...prev, { peerId, stream: event.streams[0] }];
+          });
+        };
+
+        if (localStreamRef.current) {
+          localStreamRef.current.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current));
         }
-      };
-
-      pc.ontrack = (event) => {
-        setRemoteStreams((prev) => {
-          if (prev.find((p) => p.peerId === peerId)) return prev;
-          return [...prev, { peerId, stream: event.streams[0] }];
-        });
-      };
-
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current));
+        return pc;
+      } catch (err) {
+        console.warn('Peer connection failed, continuing without video.', err);
+        setStatus('Video link unavailable; coordinates still sending.');
+        return null;
       }
-      return pc;
     },
     [socket]
   );
@@ -110,7 +117,6 @@ export default function Dashboard({ onLogout }) {
       const { data } = await api.post('/api/sos/start', loc);
       setEmergencyId(data.emergencyId);
       localStorage.setItem('sosEmergencyId', data.emergencyId);
-
       setCoords(loc);
       setActive(true);
       setStatus('SOS active, updating every 5s');
@@ -149,10 +155,7 @@ export default function Dashboard({ onLogout }) {
   useEffect(() => () => clearInterval(intervalRef.current), []);
 
   useEffect(() => {
-    const storedId = localStorage.getItem('sosEmergencyId');
-    if (!storedId) return;
-
-    setEmergencyId(storedId);
+    if (!emergencyId) return;
     setActive(true);
     setStatus('Reconnected to existing SOS session');
     beginLocationLoop();
@@ -163,7 +166,7 @@ export default function Dashboard({ onLogout }) {
         await api.post('/api/sos/update', loc);
       })
       .catch((err) => console.error('Restore location failed', err));
-  }, [beginLocationLoop, fetchLocation]);
+  }, [beginLocationLoop, emergencyId, fetchLocation]);
 
   useEffect(() => {
     if (!emergencyId) return;
@@ -171,16 +174,20 @@ export default function Dashboard({ onLogout }) {
     socket.emit('join-room', { roomId: emergencyId, user });
 
     const handlePeerJoined = async ({ socketId }) => {
-      await safeEnsureLocalStream();
+      const allowed = await safeEnsureLocalStream();
+      if (!allowed) return;
       const pc = createPeerConnection(socketId);
+      if (!pc) return;
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       socket.emit('signal', { target: socketId, description: offer });
     };
 
     const handleSignal = async ({ from, description, candidate }) => {
+      const ensurePeer = () => peersRef.current[from] || createPeerConnection(from);
       if (description) {
-        const pc = peersRef.current[from] || createPeerConnection(from);
+        const pc = ensurePeer();
+        if (!pc) return;
         await pc.setRemoteDescription(description);
         if (description.type === 'offer') {
           const answer = await pc.createAnswer();
@@ -189,7 +196,8 @@ export default function Dashboard({ onLogout }) {
         }
       }
       if (candidate) {
-        const pc = peersRef.current[from] || createPeerConnection(from);
+        const pc = ensurePeer();
+        if (!pc) return;
         await pc.addIceCandidate(candidate);
       }
     };
@@ -201,9 +209,7 @@ export default function Dashboard({ onLogout }) {
       setRemoteStreams((prev) => prev.filter((p) => p.peerId !== socketId));
     };
 
-    const handleChat = (payload) => {
-      setMessages((prev) => [...prev, payload]);
-    };
+    const handleChat = (payload) => setMessages((prev) => [...prev, payload]);
 
     socket.on('peer-joined', handlePeerJoined);
     socket.on('signal', handleSignal);
@@ -231,7 +237,9 @@ export default function Dashboard({ onLogout }) {
         <video ref={localVideoRef} autoPlay playsInline muted className="w-full rounded-xl bg-black h-64 object-cover" />
         <div className="grid gap-4">
           {remoteStreams.length === 0 && (
-            <div className="rounded-xl bg-slate-900 text-white h-64 flex items-center justify-center">Waiting for responders…</div>
+            <div className="rounded-xl bg-slate-900 text-white h-64 flex items-center justify-center">
+              Waiting for responders… (coordinates still active)
+            </div>
           )}
           {remoteStreams.map((remote) => (
             <video
@@ -271,7 +279,7 @@ export default function Dashboard({ onLogout }) {
                 <p className="text-lg font-semibold text-green-600">SOS is live</p>
                 {coords && (
                   <p className="text-sm text-slate-500">
-                    Lat {coords.latitude.toFixed(5)} — Lng {coords.longitude.toFixed(5)}
+                    Lat {coords.latitude?.toFixed(5)} — Lng {coords.longitude?.toFixed(5)}
                   </p>
                 )}
               </div>
