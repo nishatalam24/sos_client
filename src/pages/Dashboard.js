@@ -4,9 +4,8 @@ import { io } from 'socket.io-client';
 import api from '../api';
 
 export default function Dashboard({ onLogout }) {
+  const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5500';
 
-  // snippet inside Dashboard.js / Responder.js
-const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5500';
   const [active, setActive] = useState(false);
   const [status, setStatus] = useState('');
   const [coords, setCoords] = useState(null);
@@ -14,38 +13,57 @@ const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5500';
   const [remoteStreams, setRemoteStreams] = useState([]);
   const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState('');
-const messagesEndRef = useRef(null);
 
-useEffect(() => {
-  messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-}, [messages]);
   const user = useMemo(() => JSON.parse(localStorage.getItem('user') || '{}'), []);
-// const socket = useMemo(() => io(API_BASE), []);
-const socket = useMemo(() => io("http://92.5.79.20:9000", {
-  transports: ["websocket", "polling"],
-  upgrade: true
-}), []);
+  const socket = useMemo(
+    () =>
+      io(API_BASE, {
+        transports: ['websocket', 'polling'],
+        upgrade: true
+      }),
+    [API_BASE]
+  );
+
   const peersRef = useRef({});
   const localStreamRef = useRef(null);
   const localVideoRef = useRef(null);
   const intervalRef = useRef(null);
+  const messagesEndRef = useRef(null);
 
-  const fetchLocation = () =>
-    new Promise((resolve, reject) => {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
-        (err) => reject(err),
-        { enableHighAccuracy: true }
-      );
-    });
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const fetchLocation = useCallback(
+    () =>
+      new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
+          (err) => reject(err),
+          { enableHighAccuracy: true }
+        );
+      }),
+    []
+  );
 
   const ensureLocalStream = useCallback(async () => {
-    if (!localStreamRef.current) {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localStreamRef.current = stream;
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-    }
+    if (localStreamRef.current) return localStreamRef.current;
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localStreamRef.current = stream;
+    if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+    return stream;
   }, []);
+
+  const safeEnsureLocalStream = useCallback(async () => {
+    try {
+      await ensureLocalStream();
+      return true;
+    } catch (error) {
+      console.warn('Media access blocked, sending coordinates only.', error);
+      setStatus('Camera blocked; sharing only coordinates.');
+      return false;
+    }
+  }, [ensureLocalStream]);
 
   const createPeerConnection = useCallback(
     (peerId) => {
@@ -73,26 +91,32 @@ const socket = useMemo(() => io("http://92.5.79.20:9000", {
     [socket]
   );
 
+  const beginLocationLoop = useCallback(() => {
+    clearInterval(intervalRef.current);
+    intervalRef.current = setInterval(async () => {
+      try {
+        const fresh = await fetchLocation();
+        setCoords(fresh);
+        await api.post('/api/sos/update', fresh);
+      } catch (err) {
+        console.error('Location update failed', err);
+      }
+    }, 5000);
+  }, [fetchLocation]);
+
   const startSOS = async () => {
     try {
       const loc = await fetchLocation();
       const { data } = await api.post('/api/sos/start', loc);
       setEmergencyId(data.emergencyId);
-      await ensureLocalStream();
+      localStorage.setItem('sosEmergencyId', data.emergencyId);
 
       setCoords(loc);
       setActive(true);
       setStatus('SOS active, updating every 5s');
 
-      intervalRef.current = setInterval(async () => {
-        try {
-          const fresh = await fetchLocation();
-          setCoords(fresh);
-          await api.post('/api/sos/update', fresh);
-        } catch (err) {
-          console.error(err);
-        }
-      }, 5000);
+      await safeEnsureLocalStream();
+      beginLocationLoop();
     } catch (err) {
       if (err.response?.data?.expired) onLogout();
       setStatus(err.response?.data?.message || 'Unable to start SOS');
@@ -105,8 +129,9 @@ const socket = useMemo(() => io("http://92.5.79.20:9000", {
       setActive(false);
       setCoords(null);
       setStatus('SOS stopped');
-      socket.emit('leave-room', { roomId: emergencyId });
+      if (emergencyId) socket.emit('leave-room', { roomId: emergencyId });
       setEmergencyId(null);
+      localStorage.removeItem('sosEmergencyId');
     } catch (err) {
       setStatus(err.response?.data?.message || 'Failed to stop');
     } finally {
@@ -124,12 +149,29 @@ const socket = useMemo(() => io("http://92.5.79.20:9000", {
   useEffect(() => () => clearInterval(intervalRef.current), []);
 
   useEffect(() => {
+    const storedId = localStorage.getItem('sosEmergencyId');
+    if (!storedId) return;
+
+    setEmergencyId(storedId);
+    setActive(true);
+    setStatus('Reconnected to existing SOS session');
+    beginLocationLoop();
+
+    fetchLocation()
+      .then(async (loc) => {
+        setCoords(loc);
+        await api.post('/api/sos/update', loc);
+      })
+      .catch((err) => console.error('Restore location failed', err));
+  }, [beginLocationLoop, fetchLocation]);
+
+  useEffect(() => {
     if (!emergencyId) return;
 
     socket.emit('join-room', { roomId: emergencyId, user });
 
     const handlePeerJoined = async ({ socketId }) => {
-      await ensureLocalStream();
+      await safeEnsureLocalStream();
       const pc = createPeerConnection(socketId);
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -174,14 +216,14 @@ const socket = useMemo(() => io("http://92.5.79.20:9000", {
       socket.off('peer-left', handlePeerLeft);
       socket.off('chat-message', handleChat);
     };
-  }, [createPeerConnection, emergencyId, ensureLocalStream, socket, user]);
+  }, [createPeerConnection, emergencyId, safeEnsureLocalStream, socket, user]);
 
-const sendMessage = (e) => {
-  e.preventDefault();
-  if (!chatInput.trim() || !emergencyId) return;
-  socket.emit('chat-message', { roomId: emergencyId, message: chatInput.trim() });
-  setChatInput('');
-};
+  const sendMessage = (e) => {
+    e.preventDefault();
+    if (!chatInput.trim() || !emergencyId) return;
+    socket.emit('chat-message', { roomId: emergencyId, message: chatInput.trim() });
+    setChatInput('');
+  };
 
   return (
     <div className="min-h-screen px-4 py-8 space-y-6">
@@ -223,11 +265,7 @@ const sendMessage = (e) => {
 
         <div className="bg-white rounded-2xl shadow-xl p-8 text-center">
           {status && <p className="mb-4 text-sm text-slate-500">{status}</p>}
-          {!active ? (
-            <button onClick={startSOS} className="w-full py-6 rounded-2xl text-2xl font-bold text-white bg-gradient-to-r from-red-500 to-pink-500 hover:opacity-90">
-              🚨 Start SOS
-            </button>
-          ) : (
+          {active ? (
             <>
               <div className="mb-6">
                 <p className="text-lg font-semibold text-green-600">SOS is live</p>
@@ -241,10 +279,14 @@ const sendMessage = (e) => {
                 Stop SOS
               </button>
             </>
+          ) : (
+            <button onClick={startSOS} className="w-full py-6 rounded-2xl text-2xl font-bold text-white bg-gradient-to-r from-red-500 to-pink-500 hover:opacity-90">
+              🚨 Start SOS
+            </button>
           )}
         </div>
 
-      <div className="bg-white rounded-2xl shadow-xl p-6">
+        <div className="bg-white rounded-2xl shadow-xl p-6">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-semibold">Room chat</h2>
             <span className="text-xs bg-indigo-100 text-indigo-600 px-3 py-1 rounded-full">
@@ -256,7 +298,7 @@ const sendMessage = (e) => {
             {messages.map((msg, idx) => {
               const mine = msg.from?.email === user?.email;
               return (
-                <div ref={messagesEndRef} key={`${msg.timestamp}-${idx}`} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
+                <div key={`${msg.timestamp}-${idx}`} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[70%] rounded-2xl px-4 py-2 text-sm shadow ${mine ? 'bg-indigo-600 text-white' : 'bg-white text-slate-800'}`}>
                     <p className="text-[11px] opacity-70 mb-1">
                       {msg.from?.name || 'User'} · {new Date(msg.timestamp).toLocaleTimeString()}
@@ -266,6 +308,7 @@ const sendMessage = (e) => {
                 </div>
               );
             })}
+            <div ref={messagesEndRef} />
           </div>
           <form onSubmit={sendMessage} className="mt-4 flex gap-3">
             <input
