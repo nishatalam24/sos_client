@@ -13,11 +13,12 @@ export default function Responder({ onLogout }) {
   const [chatInput, setChatInput] = useState('');
 
   const user = useMemo(() => JSON.parse(localStorage.getItem('user') || '{}'), []);
-  const socket = useMemo(() => io('http://localhost:5500'), []);
+ const socket = useMemo(() => io(API_BASE), []);
   const peersRef = useRef({});
   const localStreamRef = useRef(null);
   const localVideoRef = useRef(null);
 const messagesEndRef = useRef(null);
+const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5500';
 
 
 useEffect(() => {

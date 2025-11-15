@@ -4,6 +4,9 @@ import { io } from 'socket.io-client';
 import api from '../api';
 
 export default function Dashboard({ onLogout }) {
+
+  // snippet inside Dashboard.js / Responder.js
+const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5500';
   const [active, setActive] = useState(false);
   const [status, setStatus] = useState('');
   const [coords, setCoords] = useState(null);
@@ -17,7 +20,7 @@ useEffect(() => {
   messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
 }, [messages]);
   const user = useMemo(() => JSON.parse(localStorage.getItem('user') || '{}'), []);
-  const socket = useMemo(() => io('http://localhost:5500'), []);
+const socket = useMemo(() => io(API_BASE), []);
   const peersRef = useRef({});
   const localStreamRef = useRef(null);
   const localVideoRef = useRef(null);
