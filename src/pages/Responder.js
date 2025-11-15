@@ -13,7 +13,11 @@ export default function Responder({ onLogout }) {
   const [chatInput, setChatInput] = useState('');
 
   const user = useMemo(() => JSON.parse(localStorage.getItem('user') || '{}'), []);
- const socket = useMemo(() => io(API_BASE), []);
+//  const socket = useMemo(() => io(API_BASE), []);
+const socket = useMemo(() => io("http://92.5.79.20:9000", {
+  transports: ["websocket", "polling"],
+  upgrade: true
+}), []);
   const peersRef = useRef({});
   const localStreamRef = useRef(null);
   const localVideoRef = useRef(null);
